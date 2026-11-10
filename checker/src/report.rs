@@ -59,7 +59,9 @@ fn first_line(s: &str) -> String {
 pub fn render_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig) -> String {
     let t = totals(entries);
     let mut m = String::new();
-    let _ = writeln!(m, "# Vacuity report: `{}`\n", root.display());
+    // Inside a container the real path is not meaningful; the caller can supply a label.
+    let label = std::env::var("VACUITY_ROOT_LABEL").unwrap_or_else(|_| root.display().to_string());
+    let _ = writeln!(m, "# Vacuity report: `{label}`\n");
     if let Some(remote) = git(root, &["remote", "get-url", "origin"]) {
         let _ = writeln!(m, "- Repository: {remote}");
     }
