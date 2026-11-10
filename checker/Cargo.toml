@@ -1,0 +1,10 @@
+[package]
+name = "vacuity-checker"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+quote = "1.0.47"
+serde_json = "1.0.154"
+verus_syn = { version = "0.0.0-2026-11-01-0251", features = ["full", "visit", "extra-traits", "parsing", "printing"] }
