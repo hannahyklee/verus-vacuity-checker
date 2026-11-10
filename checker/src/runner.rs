@@ -110,8 +110,21 @@ fn drain<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandle<String> {
     })
 }
 
-/// Run Verus on `file` and classify the result.
-pub fn run_verus(config: &VerusConfig, file: &Path) -> RunResult {
+/// What to execute: a program, its arguments, an optional working directory and env.
+struct Spawn<'a> {
+    program: &'a Path,
+    args: Vec<std::ffi::OsString>,
+    cwd: Option<&'a Path>,
+    env: Vec<(&'static str, std::ffi::OsString)>,
+}
+
+/// Run a process with a timeout, capturing output. `classify` maps (exit success,
+/// stdout, stderr) to an outcome when the process ran to completion.
+fn run_process(
+    sp: Spawn,
+    timeout: Duration,
+    classify: impl Fn(bool, &str, &str) -> Outcome,
+) -> RunResult {
     let start = Instant::now();
     let launch_err = |msg: String| RunResult {
         outcome: Outcome::LaunchError(msg),
@@ -120,19 +133,21 @@ pub fn run_verus(config: &VerusConfig, file: &Path) -> RunResult {
         elapsed: start.elapsed(),
     };
 
-    let mut child = match Command::new(&config.verus_path)
-        .args(&config.extra_args)
-        .arg(file)
+    let mut cmd = Command::new(sp.program);
+    cmd.args(&sp.args)
         .env("PATH", path_with_cargo())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    if let Some(cwd) = sp.cwd {
+        cmd.current_dir(cwd);
+    }
+    for (k, v) in &sp.env {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            return launch_err(format!("{}: {e}", config.verus_path.display()));
-        }
+        Err(e) => return launch_err(format!("{}: {e}", sp.program.display())),
     };
 
     // Drain pipes on threads so a chatty child can't block on a full pipe.
@@ -142,7 +157,7 @@ pub fn run_verus(config: &VerusConfig, file: &Path) -> RunResult {
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
-            Ok(None) if start.elapsed() >= config.timeout => {
+            Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -155,20 +170,58 @@ pub fn run_verus(config: &VerusConfig, file: &Path) -> RunResult {
     let stdout = out_h.join().unwrap_or_default();
     let stderr = err_h.join().unwrap_or_default();
     let elapsed = start.elapsed();
-
     let outcome = match status {
         None => Outcome::Timeout,
-        Some(status) => {
-            // Verus prints the summary to stdout; look in both to be safe.
-            let summary = parse_summary(&stdout).or_else(|| parse_summary(&stderr));
-            match summary {
-                Some((v, 0)) if status.success() => Outcome::Verified { verified: v },
-                Some((v, e)) => Outcome::Failed { verified: Some(v), errors: Some(e) },
-                None => Outcome::Failed { verified: None, errors: None },
-            }
-        }
+        Some(status) => classify(status.success(), &stdout, &stderr),
     };
     RunResult { outcome, stdout, stderr, elapsed }
+}
+
+fn summary_of(stdout: &str, stderr: &str) -> Option<(u32, u32)> {
+    // Verus prints the summary to stdout; look in both to be safe.
+    parse_summary(stdout).or_else(|| parse_summary(stderr))
+}
+
+/// Run Verus on `file` and classify the result.
+pub fn run_verus(config: &VerusConfig, file: &Path) -> RunResult {
+    let mut args: Vec<std::ffi::OsString> = config.extra_args.iter().map(Into::into).collect();
+    args.push(file.into());
+    run_process(
+        Spawn { program: &config.verus_path, args, cwd: None, env: vec![] },
+        config.timeout,
+        |ok, out, err| match summary_of(out, err) {
+            Some((v, 0)) if ok => Outcome::Verified { verified: v },
+            Some((v, e)) => Outcome::Failed { verified: Some(v), errors: Some(e) },
+            None => Outcome::Failed { verified: None, errors: None },
+        },
+    )
+}
+
+/// Run `cargo-verus verify` in `crate_dir` (the directory holding `Cargo.toml`).
+/// `cargo-verus` and `z3` are looked up next to `config.verus_path`.
+///
+/// A successful run can print no summary line (cargo skips work it has cached), so
+/// success is the exit status; the summary is only used to count errors on failure.
+pub fn run_cargo_verus(config: &VerusConfig, crate_dir: &Path) -> RunResult {
+    let dir = config.verus_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut env = Vec::new();
+    if std::env::var_os("VERUS_Z3_PATH").is_none() {
+        env.push(("VERUS_Z3_PATH", dir.join("z3").into_os_string()));
+    }
+    run_process(
+        Spawn {
+            program: &dir.join("cargo-verus"),
+            args: vec!["verify".into()],
+            cwd: Some(crate_dir),
+            env,
+        },
+        config.timeout,
+        |ok, out, err| match (ok, summary_of(out, err)) {
+            (true, s) => Outcome::Verified { verified: s.map_or(0, |(v, _)| v) },
+            (false, Some((v, e))) => Outcome::Failed { verified: Some(v), errors: Some(e) },
+            (false, None) => Outcome::Failed { verified: None, errors: None },
+        },
+    )
 }
 
 #[cfg(test)]

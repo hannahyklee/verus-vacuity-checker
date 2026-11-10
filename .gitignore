@@ -1,1 +1,4 @@
 target/
+results/
+experiments/*/
+test_files/crates/*/Cargo.lock

@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use vacuity_checker::driver::{check_file, Verdict};
+use vacuity_checker::driver::{check_crate, check_file, Verdict};
 use vacuity_checker::extract::extract_functions;
 use vacuity_checker::mutate::write_mutants;
 use vacuity_checker::runner::{run_verus, Outcome, VerusConfig};
+use vacuity_checker::report::write_outputs;
+use vacuity_checker::sweep::{sweep, FileResult, SweepEntry};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -29,10 +31,14 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("check") && args.len() >= 2 {
         return check_cmd(&args[1], &args[2..]);
     }
+    if args.first().map(String::as_str) == Some("sweep") && args.len() >= 2 {
+        return sweep_cmd(&args[1], &args[2..]);
+    }
     if args.first().map(String::as_str) != Some("run") || args.len() < 2 {
         eprintln!("usage: vacuity-checker run <file.rs> [--timeout SECS] [--verus PATH]");
         eprintln!("       vacuity-checker extract <file.rs>");
         eprintln!("       vacuity-checker mutate <file.rs> <out_dir>");
+        eprintln!("       vacuity-checker sweep <dir> [--out DIR] [--jobs N] [--timeout SECS] [--verus PATH]");
         eprintln!("       vacuity-checker check <file.rs> [--out DIR] [--timeout SECS] [--verus PATH]");
         return ExitCode::from(2);
     }
@@ -120,25 +126,74 @@ fn check_cmd(path: &str, opts: &[String]) -> ExitCode {
     let input = PathBuf::from(path);
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("input");
     let out = out.unwrap_or_else(|| PathBuf::from("results").join(stem));
-    match check_file(&config, &input, &out) {
+    // A directory with a Cargo.toml is checked as a crate with `cargo verus verify`.
+    let checked = if input.is_dir() { check_crate(&config, &input, &out) } else { check_file(&config, &input, &out) };
+    match checked {
         Ok(report) => {
-            let mut vacuous = 0;
-            for f in &report.functions {
-                let (tag, note) = match &f.verdict {
-                    Verdict::Vacuous => {
-                        vacuous += 1;
-                        ("VACUOUS", String::new())
-                    }
-                    Verdict::NotVacuous => ("ok", String::new()),
-                    Verdict::Inconclusive(why) => ("?", format!("  ({why})")),
-                };
-                println!("{tag:8} {}:{}  {}{note}", path, f.line, f.name);
-            }
-            println!("{} function(s) checked, {vacuous} vacuous; mutants in {}", report.functions.len(), out.display());
-            ExitCode::SUCCESS
+            let rel = input.file_name().map(PathBuf::from).unwrap_or_default();
+            let entry = SweepEntry { rel_path: rel, result: FileResult::Checked(report) };
+            let root = input.parent().map(PathBuf::from).unwrap_or_default();
+            finish(&root, &out, &[entry], &config)
         }
         Err(e) => {
             eprintln!("{path}: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn sweep_cmd(root: &str, opts: &[String]) -> ExitCode {
+    let mut config = VerusConfig::default();
+    let mut out = PathBuf::from("results/sweep");
+    let mut jobs = 2usize;
+    let mut it = opts.iter();
+    while let Some(a) = it.next() {
+        match (a.as_str(), it.next()) {
+            ("--out", Some(v)) => out = PathBuf::from(v),
+            ("--jobs", Some(v)) => match v.parse() {
+                Ok(n) => jobs = n,
+                Err(_) => return ExitCode::from(2),
+            },
+            ("--timeout", Some(v)) => match v.parse() {
+                Ok(s) => config.timeout = Duration::from_secs(s),
+                Err(_) => return ExitCode::from(2),
+            },
+            ("--verus", Some(v)) => config.verus_path = PathBuf::from(v),
+            _ => {
+                eprintln!("bad argument: {a}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let root = PathBuf::from(root);
+    if let Err(e) = vacuity_checker::outdir::prepare(&out) {
+        eprintln!("{e}");
+        return ExitCode::from(1);
+    }
+    let entries = sweep(&config, &root, &out, jobs);
+    finish(&root, &out, &entries, &config)
+}
+
+/// Print vacuous findings and write `report.md` / `summary.json`.
+fn finish(root: &std::path::Path, out: &std::path::Path, entries: &[SweepEntry], config: &VerusConfig) -> ExitCode {
+    for e in entries {
+        if let FileResult::Checked(r) = &e.result {
+            for f in r.functions.iter().filter(|f| f.verdict == Verdict::Vacuous) {
+                println!("VACUOUS  {}:{}  {}", e.path_of(f).display(), f.line, f.name);
+            }
+        }
+    }
+    match write_outputs(root, out, entries, config) {
+        Ok(t) => {
+            println!(
+                "{} target(s): {} checked, {} skipped (baseline failed); {} function(s) mutated, {} vacuous, {} inconclusive",
+                t.targets, t.checked, t.skipped, t.functions, t.vacuous, t.inconclusive
+            );
+            println!("report: {}", out.join("report.md").display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("could not write report: {e}");
             ExitCode::from(1)
         }
     }
