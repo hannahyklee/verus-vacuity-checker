@@ -1,10 +1,13 @@
+mod common;
+
 use std::path::PathBuf;
 use vacuity_checker::driver::Verdict;
 use vacuity_checker::runner::VerusConfig;
 use vacuity_checker::sweep::{find_verus_files, sweep, FileResult};
 
-fn test_files() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test_files")
+/// A private copy of `test_files/`: sweeps mutate crates in place, and these tests run in parallel.
+fn test_files(name: &str) -> PathBuf {
+    common::private_copy(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test_files"), name)
 }
 
 #[test]
@@ -27,7 +30,7 @@ fn finds_only_files_with_verus_blocks() {
 fn sweeps_test_files() {
     let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sweep_test_files");
     let _ = std::fs::remove_dir_all(&out);
-    let entries = sweep(&VerusConfig::default(), &test_files(), &out, 4);
+    let entries = sweep(&VerusConfig::default(), &test_files("sweep_all"), &out, 4);
 
     let by_name = |n: &str| entries.iter().find(|e| e.rel_path.to_str() == Some(n)).unwrap();
     // Baseline failures are skipped, not mutated.
@@ -53,4 +56,31 @@ fn sweeps_test_files() {
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted);
+}
+
+#[test]
+fn config_sweep_checks_only_listed_targets() {
+    use vacuity_checker::config::ProjectConfig;
+    use vacuity_checker::sweep::sweep_config;
+
+    let project = ProjectConfig::from_str(
+        "name = \"t\"\n[[target]]\npath = \"crates/vacuity_crate\"\ntimeout_secs = 600\n[[target]]\npath = \"crates/does_not_exist\"\n",
+    )
+    .unwrap();
+    let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sweep_config");
+    let _ = std::fs::remove_dir_all(&out);
+    let entries = sweep_config(&VerusConfig::default(), &test_files("sweep_cfg"), &out, 2, &project);
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].rel_path, PathBuf::from("crates/vacuity_crate"));
+    match &entries[0].result {
+        FileResult::Checked(r) => {
+            let count = |v: Verdict| r.functions.iter().filter(|f| f.verdict == v).count();
+            // 2 contradictory, 2 normal, and 2 functions in files that are not compiled.
+            assert_eq!((r.functions.len(), count(Verdict::Vacuous), count(Verdict::NotCompiled)), (6, 2, 2));
+        }
+        other => panic!("{other:?}"),
+    }
+    // A listed target that is missing is reported, not silently dropped.
+    assert!(matches!(entries[1].result, FileResult::Skipped(_)));
 }

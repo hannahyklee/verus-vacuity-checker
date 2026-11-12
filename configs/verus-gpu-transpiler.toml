@@ -1,0 +1,7 @@
+# https://github.com/Phylliida/verus-gpu-transpiler
+# Cargo.toml points vstd at ../verus-dev, which is not available, so use plain verus on the root.
+name = "verus-gpu-transpiler"
+
+[[target]]
+path = "."
+root = "src/lib.rs"

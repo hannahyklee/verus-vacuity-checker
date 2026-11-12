@@ -1,0 +1,18 @@
+# https://github.com/pulseengine/gale
+# The repo verifies with Bazel (`//:verus_test`, rules_verus: src/*.rs as crate `gale`); we call
+# verus on the crate root directly.
+name = "gale"
+
+# rules_verus pins Verus 0.2026.02.15 (it has no arm64 Linux build: run with DOCKER_PLATFORM=linux/amd64).
+# This Verus rejects `unimplemented!()` ("panic is not supported"), so stub with vstd's `unreached()`.
+stub = "assert_false"
+
+[verus]
+version = "0.2026.02.15.61aa1bf"
+
+[[target]]
+path = "."
+root = "src/lib.rs"
+# 543 candidates, each a full re-verification: sample 100 spread over the crate.
+max_functions = 100
+verus_args = ["--crate-name", "gale"]

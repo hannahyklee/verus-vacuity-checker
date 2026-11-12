@@ -1,0 +1,12 @@
+# https://github.com/matthias-brun/verified-nrkernel
+# Mirrors the repo's CI command (page-table/Cargo.toml needs a ../.verus checkout, so we skip cargo).
+name = "verified-nrkernel"
+
+# The newest Verus (0.2026.11.02) rejects the crate's `#[no_mangle]` attributes, so use an older release.
+[verus]
+version = "0.2026.10.26.d17fbd0"
+
+[[target]]
+path = "page-table"
+root = "src/lib.rs"
+verus_args = ["--rlimit", "100", "--cfg", "feature=\"impl\"", "--cfg", "feature=\"hlspec_user\""]

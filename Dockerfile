@@ -30,6 +30,8 @@ RUN set -eux; \
     d="$(dirname "$(find /tmp/verus-unzip -name verus -type f | head -n1)")"; \
     mv "$d" /opt/verus; \
     rm -rf /tmp/verus.zip /tmp/verus-unzip; \
+    tc="$(/opt/verus/verus --version 2>&1 | grep -o 'rust toolchain [0-9][0-9.]*-[a-z0-9_-]*' | head -n1 | cut -d' ' -f3 || true)"; \
+    if [ -n "$tc" ]; then rustup toolchain install "$tc" --profile minimal; fi; \
     /opt/verus/verus --version
 
 COPY --from=build /src/checker/target/release/vacuity-checker /usr/local/bin/vacuity-checker

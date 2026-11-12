@@ -8,6 +8,27 @@ use crate::extract::{extract_functions, FnInfo};
 /// so a mutant verifies only if the function's `requires` is contradictory.
 pub const STUB: &str = "{ unimplemented!() }";
 
+/// For Verus releases that reject `unimplemented!()` ("panic is not supported"): vstd's
+/// `unreached()` (precondition `false`) has the same verification semantics.
+pub const STUB_ASSERT_FALSE: &str = "{ vstd::pervasive::unreached() }";
+
+static USE_ASSERT_FALSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Select the stub used by every mutation in this process (a sweep checks one project).
+pub fn set_stub(name: &str) -> Result<(), String> {
+    match name {
+        "unimplemented" => USE_ASSERT_FALSE.store(false, std::sync::atomic::Ordering::SeqCst),
+        "assert_false" => USE_ASSERT_FALSE.store(true, std::sync::atomic::Ordering::SeqCst),
+        other => return Err(format!("unknown stub '{other}' (expected 'unimplemented' or 'assert_false')")),
+    }
+    Ok(())
+}
+
+/// The stub currently in use.
+pub fn stub() -> &'static str {
+    if USE_ASSERT_FALSE.load(std::sync::atomic::Ordering::SeqCst) { STUB_ASSERT_FALSE } else { STUB }
+}
+
 /// Return `src` with `f`'s body replaced by [`STUB`]. Everything else is byte-identical.
 /// The newlines of the old body are kept (after the stub) so line numbers below
 /// the function don't shift and errors map back to the original file.
@@ -16,7 +37,7 @@ pub fn mutate_source(src: &str, f: &FnInfo) -> String {
     let newlines = old.matches('\n').count();
     let mut out = String::with_capacity(src.len());
     out.push_str(&src[..f.body.start]);
-    out.push_str(STUB);
+    out.push_str(stub());
     out.push_str(&"\n".repeat(newlines));
     out.push_str(&src[f.body.end..]);
     out

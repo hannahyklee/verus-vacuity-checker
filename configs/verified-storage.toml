@@ -1,0 +1,28 @@
+# https://github.com/microsoft/verified-storage
+# The crates pin vstd =0.0.0-2026-10-25-0158, which only works with the Verus release below
+# (the newest one, 0.2026.11.02, panics on this vstd: "unexpected verus diagnostic item").
+name = "verified-storage"
+
+[verus]
+version = "0.2026.10.26.d17fbd0"
+
+# `--no-default-features` drops the `pmem` feature, whose build.rs needs libclang and PMDK to
+# generate bindings. It does not change the verified Rust code; items gated on `cfg(feature = "pmem")`
+# are not compiled without it, and the checker skips cfg-gated functions.
+
+[[target]]
+path = "pmemlog"
+
+[[target]]
+path = "multilog/pmsafe"
+
+[[target]]
+path = "multilog/multilog"
+cargo_args = ["--no-default-features"]
+
+[[target]]
+path = "capybaraKV/pmcopy"
+
+[[target]]
+path = "capybaraKV/capybarakv"
+cargo_args = ["--no-default-features"]

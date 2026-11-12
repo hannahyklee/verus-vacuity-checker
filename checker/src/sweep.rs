@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use crate::driver::{check_crate, check_file, Report};
+use std::time::Duration;
+
+use crate::config::ProjectConfig;
+use crate::driver::{check_crate_with, check_file, CrateOptions, Report};
 use crate::runner::VerusConfig;
 
 #[derive(Debug)]
@@ -85,7 +88,8 @@ pub fn find_verus_files(root: &Path, skip_dir: Option<&Path>) -> Vec<PathBuf> {
 }
 
 enum Job {
-    Crate(PathBuf),
+    /// A crate, with per-project options and an optional per-run timeout.
+    Crate(PathBuf, CrateOptions, Option<Duration>),
     File(PathBuf),
 }
 
@@ -93,12 +97,44 @@ enum Job {
 /// Mutants go to `out_dir/<relative path with separators replaced>/`.
 pub fn sweep(config: &VerusConfig, root: &Path, out_dir: &Path, jobs: usize) -> Vec<SweepEntry> {
     let found = find_projects(root, Some(out_dir));
-    let jobs_list: Vec<Job> = found
+    let list: Vec<Job> = found
         .crates
         .into_iter()
-        .map(Job::Crate)
+        .map(|p| Job::Crate(p, CrateOptions::default(), None))
         .chain(found.files.into_iter().map(Job::File))
         .collect();
+    run_jobs(config, root, out_dir, jobs, list)
+}
+
+/// Check exactly the crates listed in a project config (no discovery), each with its
+/// own cargo arguments, environment and timeout. Targets missing on disk are reported
+/// as skipped.
+pub fn sweep_config(
+    config: &VerusConfig,
+    root: &Path,
+    out_dir: &Path,
+    jobs: usize,
+    project: &ProjectConfig,
+) -> Vec<SweepEntry> {
+    let list: Vec<Job> = project
+        .targets
+        .iter()
+        .map(|t| {
+            let opts = CrateOptions {
+                cargo_args: t.cargo_args.clone(),
+                root: t.root.clone(),
+                max_functions: t.max_functions,
+                single_function: t.single_function.unwrap_or(false),
+                verus_args: t.verus_args.clone(),
+                env: t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            };
+            Job::Crate(root.join(&t.path), opts, t.timeout_secs.map(Duration::from_secs))
+        })
+        .collect();
+    run_jobs(config, root, out_dir, jobs, list)
+}
+
+fn run_jobs(config: &VerusConfig, root: &Path, out_dir: &Path, jobs: usize, list: Vec<Job>) -> Vec<SweepEntry> {
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<(usize, SweepEntry)>> = Mutex::new(Vec::new());
 
@@ -106,15 +142,21 @@ pub fn sweep(config: &VerusConfig, root: &Path, out_dir: &Path, jobs: usize) -> 
         for _ in 0..jobs.max(1) {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::SeqCst);
-                let Some(job) = jobs_list.get(i) else { break };
+                let Some(job) = list.get(i) else { break };
                 let path = match job {
-                    Job::Crate(p) | Job::File(p) => p,
+                    Job::Crate(p, ..) | Job::File(p) => p,
                 };
                 let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
                 let sub = rel.with_extension("").to_string_lossy().replace(['/', '\\'], "__");
                 let sub = if sub.is_empty() { "crate".to_string() } else { sub };
                 let checked = match job {
-                    Job::Crate(p) => check_crate(config, p, &out_dir.join(&sub)),
+                    Job::Crate(p, opts, timeout) => {
+                        let mut cfg = config.clone();
+                        if let Some(t) = timeout {
+                            cfg.timeout = *t;
+                        }
+                        check_crate_with(&cfg, p, &out_dir.join(&sub), opts)
+                    }
                     Job::File(p) => check_file(config, p, &out_dir.join(&sub)),
                 };
                 let result = match checked {
@@ -129,4 +171,22 @@ pub fn sweep(config: &VerusConfig, root: &Path, out_dir: &Path, jobs: usize) -> 
     let mut v = results.into_inner().unwrap();
     v.sort_by_key(|(i, _)| *i);
     v.into_iter().map(|(_, e)| e).collect()
+}
+
+/// Run the project's `setup` commands in `root`. Output goes to stderr.
+pub fn run_setup(root: &Path, project: &ProjectConfig) -> Result<(), String> {
+    for cmd in &project.setup {
+        eprintln!("setup: {cmd}");
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(root)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("setup `{cmd}`: {e}"))?;
+        if !status.success() {
+            return Err(format!("setup `{cmd}` failed ({status})"));
+        }
+    }
+    Ok(())
 }

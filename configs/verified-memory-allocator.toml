@@ -1,0 +1,12 @@
+# https://github.com/verus-lang/verified-memory-allocator
+# Mirrors verus-mimalloc/verify.sh. The allocator needs a `libc` rlib, which setup builds the
+# same way setup-libc-dependency.sh does (needs network the first time, for the libc crate).
+name = "verified-memory-allocator"
+setup = [
+  "mkdir -p build && cd test_libc && cargo build --release && cd .. && cp $(find test_libc/target/release/deps -name 'liblibc-*.rlib' | head -1) build/liblibc.rlib",
+]
+
+[[target]]
+path = "verus-mimalloc"
+root = "lib.rs"
+verus_args = ["--triggers-mode=silent", "--no-auto-recommends-check", "--rlimit", "100", "--extern", "libc=../build/liblibc.rlib"]

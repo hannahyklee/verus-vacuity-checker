@@ -1,0 +1,8 @@
+# https://github.com/verus-lang/verified-node-replication
+# Mirrors tools/verify-node-replication.sh (`verus --crate-type=lib .../src/lib.rs`); the crate's
+# Cargo.toml points at a ../verus submodule checkout, so we skip cargo.
+name = "verified-node-replication"
+
+[[target]]
+path = "verified-node-replication"
+root = "src/lib.rs"

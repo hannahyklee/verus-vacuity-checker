@@ -16,6 +16,8 @@ pub struct Totals {
     pub functions: usize,
     pub vacuous: usize,
     pub inconclusive: usize,
+    /// Functions in files that are not part of the build; no mutant was run.
+    pub not_compiled: usize,
 }
 
 pub fn totals(entries: &[SweepEntry]) -> Totals {
@@ -30,6 +32,7 @@ pub fn totals(entries: &[SweepEntry]) -> Totals {
                     match f.verdict {
                         Verdict::Vacuous => t.vacuous += 1,
                         Verdict::Inconclusive(_) => t.inconclusive += 1,
+                        Verdict::NotCompiled => t.not_compiled += 1,
                         Verdict::NotVacuous => {}
                     }
                 }
@@ -69,7 +72,7 @@ pub fn render_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig
         let _ = writeln!(m, "- Commit: `{commit}`");
     }
     let _ = writeln!(m, "- Verus: {}", verus_version(config).unwrap_or_else(|| "unknown".into()));
-    let _ = writeln!(m, "- Stub: `unimplemented!()` (a mutant verifies only if the function's `requires` is unsatisfiable)\n");
+    let _ = writeln!(m, "- Stub: `{}` (a mutant verifies only if the function's `requires` is unsatisfiable)\n", crate::mutate::stub());
 
     let _ = writeln!(m, "## Summary\n");
     let _ = writeln!(m, "| | |\n|---|---|");
@@ -78,8 +81,9 @@ pub fn render_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig
     let _ = writeln!(m, "| Skipped (baseline did not verify) | {} |", t.skipped);
     let _ = writeln!(m, "| Functions mutated | {} |", t.functions);
     let _ = writeln!(m, "| **Vacuous** | **{}** |", t.vacuous);
-    let _ = writeln!(m, "| Not vacuous | {} |", t.functions - t.vacuous - t.inconclusive);
-    let _ = writeln!(m, "| Inconclusive | {} |\n", t.inconclusive);
+    let _ = writeln!(m, "| Not vacuous | {} |", t.functions - t.vacuous - t.inconclusive - t.not_compiled);
+    let _ = writeln!(m, "| Inconclusive | {} |", t.inconclusive);
+    let _ = writeln!(m, "| Skipped: file not compiled in this build | {} |\n", t.not_compiled);
 
     let _ = writeln!(m, "## Vacuous functions ({})\n", t.vacuous);
     if t.vacuous == 0 {
@@ -91,8 +95,9 @@ pub fn render_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig
             let _ = writeln!(m, "### `{}` in `{}:{}`\n", f.name, e.path_of(f).display(), f.line);
             let _ = writeln!(
                 m,
-                "With its body replaced by `unimplemented!()` the file still verifies, so the \
-                 precondition can never hold. Mutation:\n"
+                "With its body replaced by `{}` the file still verifies, so the \
+                 precondition can never hold. Mutation:\n",
+                crate::mutate::stub()
             );
             let diff = std::fs::read_to_string(&f.diff).unwrap_or_else(|_| "(diff unavailable)\n".into());
             let _ = writeln!(m, "```diff\n{}```\n", diff);
@@ -108,6 +113,27 @@ pub fn render_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig
                 if let Verdict::Inconclusive(why) = &f.verdict {
                     let _ = writeln!(m, "| `{}` | `{}:{}` | {why} |", f.name, e.path_of(f).display(), f.line);
                 }
+            }
+        }
+        m.push('\n');
+    }
+
+    if t.not_compiled > 0 {
+        let _ = writeln!(m, "## Not compiled in this build ({})\n", t.not_compiled);
+        let _ = writeln!(
+            m,
+            "These functions are in files the build does not include (inactive `cfg`, or a module that \
+             is not declared), so a stubbed copy would verify trivially. They were not mutated.\n"
+        );
+        let _ = writeln!(m, "| File | Functions |\n|---|---|");
+        for e in entries {
+            let FileResult::Checked(r) = &e.result else { continue };
+            let mut by_file: std::collections::BTreeMap<String, usize> = Default::default();
+            for f in r.functions.iter().filter(|f| f.verdict == Verdict::NotCompiled) {
+                *by_file.entry(e.path_of(f).display().to_string()).or_default() += 1;
+            }
+            for (file, n) in by_file {
+                let _ = writeln!(m, "| `{file}` | {n} |");
             }
         }
         m.push('\n');
@@ -146,6 +172,7 @@ pub fn summary_json(entries: &[SweepEntry]) -> serde_json::Value {
                         Verdict::Vacuous => "vacuous".to_string(),
                         Verdict::NotVacuous => "not_vacuous".to_string(),
                         Verdict::Inconclusive(w) => format!("inconclusive: {w}"),
+                        Verdict::NotCompiled => "not_compiled".to_string(),
                     };
                     v.push(serde_json::json!({
                         "file": e.path_of(f), "function": f.name, "line": f.line,

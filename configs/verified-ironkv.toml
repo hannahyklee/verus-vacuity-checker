@@ -1,0 +1,9 @@
+# https://github.com/verus-lang/verified-ironkv
+# The repo builds with SCons; its CI verifies with a plain `verus` call, so we do the same
+# (this also avoids ironsht's git dependency on vstd, which needs network access).
+name = "verified-ironkv"
+
+[[target]]
+path = "ironsht"
+root = "src/lib.rs"
+verus_args = ["--crate-type=dylib"]

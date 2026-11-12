@@ -29,3 +29,10 @@ fn only_contradictory_requires_verifies_with_stub() {
     failed.sort();
     assert_eq!(failed, ["good", "requires_only", "weak"]);
 }
+
+#[test]
+fn assert_false_stub_has_the_same_semantics() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test_files/stub_semantics_assert.rs");
+    let r = run_verus(&VerusConfig::default(), &path);
+    assert_eq!(r.outcome, Outcome::Failed { verified: Some(2), errors: Some(3) }, "{}{}", r.stdout, r.stderr);
+}

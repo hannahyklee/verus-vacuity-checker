@@ -84,6 +84,16 @@ pub fn parse_summary(output: &str) -> Option<(u32, u32)> {
     Some((verified, errors))
 }
 
+/// The first `error...` line of the combined output (ANSI stripped), with the line after it
+/// when that line carries the explanation. Used to say *why* a run failed.
+pub fn first_error(stdout: &str, stderr: &str) -> Option<String> {
+    let all = strip_ansi(&format!("{stderr}\n{stdout}"));
+    all.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("error") && !l.starts_with("error: could not compile") && !l.starts_with("error: aborting"))
+        .map(|l| l.chars().take(160).collect())
+}
+
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -115,7 +125,7 @@ struct Spawn<'a> {
     program: &'a Path,
     args: Vec<std::ffi::OsString>,
     cwd: Option<&'a Path>,
-    env: Vec<(&'static str, std::ffi::OsString)>,
+    env: Vec<(String, std::ffi::OsString)>,
 }
 
 /// Run a process with a timeout, capturing output. `classify` maps (exit success,
@@ -184,12 +194,20 @@ fn summary_of(stdout: &str, stderr: &str) -> Option<(u32, u32)> {
 
 /// Run Verus on `file` and classify the result.
 pub fn run_verus(config: &VerusConfig, file: &Path) -> RunResult {
+    run_verus_in(config, None, file)
+}
+
+/// [`run_verus`] with a working directory (relative `--extern` paths in `extra_args` resolve there).
+pub fn run_verus_in(config: &VerusConfig, cwd: Option<&Path>, file: &Path) -> RunResult {
     let mut args: Vec<std::ffi::OsString> = config.extra_args.iter().map(Into::into).collect();
     args.push(file.into());
+    let no_verify = config.extra_args.iter().any(|a| a == "--no-verify");
     run_process(
-        Spawn { program: &config.verus_path, args, cwd: None, env: vec![] },
+        Spawn { program: &config.verus_path, args, cwd, env: vec![] },
         config.timeout,
-        |ok, out, err| match summary_of(out, err) {
+        move |ok, out, err| match summary_of(out, err) {
+            // `--no-verify` prints no summary: a clean exit is a successful compile.
+            None if ok && no_verify => Outcome::Verified { verified: 0 },
             Some((v, 0)) if ok => Outcome::Verified { verified: v },
             Some((v, e)) => Outcome::Failed { verified: Some(v), errors: Some(e) },
             None => Outcome::Failed { verified: None, errors: None },
@@ -203,15 +221,28 @@ pub fn run_verus(config: &VerusConfig, file: &Path) -> RunResult {
 /// A successful run can print no summary line (cargo skips work it has cached), so
 /// success is the exit status; the summary is only used to count errors on failure.
 pub fn run_cargo_verus(config: &VerusConfig, crate_dir: &Path) -> RunResult {
+    run_cargo_verus_with(config, crate_dir, &[], &[])
+}
+
+/// Like [`run_cargo_verus`], with extra `cargo verus verify` arguments and environment variables.
+pub fn run_cargo_verus_with(
+    config: &VerusConfig,
+    crate_dir: &Path,
+    cargo_args: &[String],
+    extra_env: &[(String, String)],
+) -> RunResult {
     let dir = config.verus_path.parent().unwrap_or_else(|| Path::new("."));
     let mut env = Vec::new();
     if std::env::var_os("VERUS_Z3_PATH").is_none() {
-        env.push(("VERUS_Z3_PATH", dir.join("z3").into_os_string()));
+        env.push(("VERUS_Z3_PATH".to_string(), dir.join("z3").into_os_string()));
     }
+    env.extend(extra_env.iter().map(|(k, v)| (k.clone(), v.into())));
+    let mut args: Vec<std::ffi::OsString> = vec!["verify".into()];
+    args.extend(cargo_args.iter().map(Into::into));
     run_process(
         Spawn {
             program: &dir.join("cargo-verus"),
-            args: vec!["verify".into()],
+            args,
             cwd: Some(crate_dir),
             env,
         },

@@ -1,0 +1,18 @@
+# https://github.com/stonysystems/tla-rs
+# The repo builds with SCons, which runs one `verus` call on src/lib.rs (see SConstruct); CI pins
+# Verus 0.2026.08.02 (no arm64 Linux build: run with DOCKER_PLATFORM=linux/amd64).
+name = "tla-rs"
+stub = "assert_false"
+
+[verus]
+version = "0.2026.08.02.b677dd5"
+
+[[target]]
+path = "."
+root = "src/lib.rs"
+verus_args = ["--crate-name=tla_protocol", "--crate-type=rlib", "--expand-errors"]
+# A full verification takes ~1.5 min here (emulated x86), and each mutant needs one: sample 50.
+max_functions = 50
+# Single-function verification is unfinished; use full re-verification of every mutant.
+single_function = false
+timeout_secs = 900

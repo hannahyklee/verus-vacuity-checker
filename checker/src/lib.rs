@@ -1,4 +1,5 @@
 //! Vacuity checker for Verus.
+pub mod config;
 pub mod driver;
 pub mod extract;
 pub mod mutate;
