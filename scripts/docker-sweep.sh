@@ -8,6 +8,8 @@
 # Env: DOCKER_PLATFORM (e.g. linux/amd64: run an x86 image under emulation, for Verus releases
 #      that have no arm64 Linux build), CPUS (default 4), MEMORY (default 8g), DOCKER_NETWORK (default bridge; crates need
 #      network to fetch dependencies, single files do not: use DOCKER_NETWORK=none).
+#      MUTATION=default_body: weak-ensures check (bodies replaced by default return values); results go to
+#      results/docker/<repo name>-weak-ensures/ so the vacuity results are kept.
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
@@ -39,6 +41,11 @@ set -- ${rest[@]+"${rest[@]}"}
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="${root}/results/docker/$(basename "$repo")"
+mut=()
+if [ -n "${MUTATION:-}" ]; then
+    mut=(--mutation "$MUTATION")
+    [ "$MUTATION" = "default_body" ] && out="${out}-weak-ensures"
+fi
 mkdir -p "$out"
 
 image="vacuity-checker"
@@ -71,6 +78,6 @@ docker run --rm ${plat[@]+"${plat[@]}"} \
     -v "${repo}:/input:ro" \
     -v "${out}:/output" \
     ${mounts[@]+"${mounts[@]}"} \
-    "$image" "$sub" ${config_args[@]+"${config_args[@]}"} "$@" || status=$?
+    "$image" "$sub" ${config_args[@]+"${config_args[@]}"} ${mut[@]+"${mut[@]}"} "$@" || status=$?
 echo "report: ${out}/report/report.md"
 exit "$status"

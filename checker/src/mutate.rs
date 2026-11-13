@@ -29,7 +29,33 @@ pub fn stub() -> &'static str {
     if USE_ASSERT_FALSE.load(std::sync::atomic::Ordering::SeqCst) { STUB_ASSERT_FALSE } else { STUB }
 }
 
-/// Return `src` with `f`'s body replaced by [`STUB`]. Everything else is byte-identical.
+/// What a mutant replaces a function body with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// An unreachable stub: the mutant verifies only if the `requires` is unsatisfiable.
+    Stub,
+    /// A default value of the return type: the mutant verifies only if the `ensures` accepts that
+    /// default, i.e. the postcondition does not pin down the behaviour (it may be weak).
+    DefaultBody,
+}
+
+static DEFAULT_BODY_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Select the mutation used by every run in this process.
+pub fn set_mode(name: &str) -> Result<(), String> {
+    match name {
+        "stub" => DEFAULT_BODY_MODE.store(false, std::sync::atomic::Ordering::SeqCst),
+        "default_body" => DEFAULT_BODY_MODE.store(true, std::sync::atomic::Ordering::SeqCst),
+        other => return Err(format!("unknown mutation '{other}' (expected 'stub' or 'default_body')")),
+    }
+    Ok(())
+}
+
+pub fn mode() -> Mode {
+    if DEFAULT_BODY_MODE.load(std::sync::atomic::Ordering::SeqCst) { Mode::DefaultBody } else { Mode::Stub }
+}
+
+/// Return `src` with `f`'s body replaced by [`STUB`] (or, in [`Mode::DefaultBody`], by a default value). Everything else is byte-identical.
 /// The newlines of the old body are kept (after the stub) so line numbers below
 /// the function don't shift and errors map back to the original file.
 pub fn mutate_source(src: &str, f: &FnInfo) -> String {
@@ -37,7 +63,10 @@ pub fn mutate_source(src: &str, f: &FnInfo) -> String {
     let newlines = old.matches('\n').count();
     let mut out = String::with_capacity(src.len());
     out.push_str(&src[..f.body.start]);
-    out.push_str(stub());
+    match (mode(), &f.default_body) {
+        (Mode::DefaultBody, Some(body)) => out.push_str(body),
+        _ => out.push_str(stub()),
+    }
     out.push_str(&"\n".repeat(newlines));
     out.push_str(&src[f.body.end..]);
     out

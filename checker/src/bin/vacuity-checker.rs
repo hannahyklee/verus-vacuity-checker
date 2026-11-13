@@ -52,7 +52,7 @@ fn main() -> ExitCode {
         eprintln!("usage: vacuity-checker run <file.rs> [--timeout SECS] [--verus PATH]");
         eprintln!("       vacuity-checker extract <file.rs>");
         eprintln!("       vacuity-checker mutate <file.rs> <out_dir>");
-        eprintln!("       vacuity-checker sweep <dir> [--config FILE] [--out DIR] [--jobs N] [--timeout SECS] [--verus PATH]");
+        eprintln!("       vacuity-checker sweep <dir> [--config FILE] [--out DIR] [--jobs N] [--timeout SECS] [--verus PATH] [--mutation stub|default_body]");
         eprintln!("       vacuity-checker check <file.rs> [--out DIR] [--timeout SECS] [--verus PATH]");
         return ExitCode::from(2);
     }
@@ -105,6 +105,7 @@ fn extract_cmd(path: &str) -> ExitCode {
                         "has_ensures": f.has_ensures,
                         "external": f.external,
                         "candidate": f.is_candidate(),
+                        "default_body": f.default_body,
                         "body": [f.body.start, f.body.end],
                     })
                 })
@@ -181,6 +182,12 @@ fn sweep_cmd(root: &str, opts: &[String]) -> ExitCode {
                 Err(_) => return ExitCode::from(2),
             },
             ("--verus", Some(v)) => config.verus_path = PathBuf::from(v),
+            ("--mutation", Some(v)) => {
+                if let Err(e) = vacuity_checker::mutate::set_mode(v) {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
+                }
+            }
             _ => {
                 eprintln!("bad argument: {a}");
                 return ExitCode::from(2);
@@ -215,16 +222,17 @@ fn sweep_cmd(root: &str, opts: &[String]) -> ExitCode {
 fn finish(root: &std::path::Path, out: &std::path::Path, entries: &[SweepEntry], config: &VerusConfig) -> ExitCode {
     for e in entries {
         if let FileResult::Checked(r) = &e.result {
-            for f in r.functions.iter().filter(|f| f.verdict == Verdict::Vacuous) {
-                println!("VACUOUS  {}:{}  {}", e.path_of(f).display(), f.line, f.name);
+            for f in r.functions.iter().filter(|f| matches!(f.verdict, Verdict::Vacuous | Verdict::Weak)) {
+                let tag = if f.verdict == Verdict::Weak { "WEAK?   " } else { "VACUOUS " };
+                println!("{tag} {}:{}  {}", e.path_of(f).display(), f.line, f.name);
             }
         }
     }
     match write_outputs(root, out, entries, config) {
         Ok(t) => {
             println!(
-                "{} target(s): {} checked, {} skipped (baseline failed); {} function(s) mutated, {} vacuous, {} inconclusive, {} in files not compiled",
-                t.targets, t.checked, t.skipped, t.functions - t.not_compiled, t.vacuous, t.inconclusive, t.not_compiled
+                "{} target(s): {} checked, {} skipped (baseline failed); {} function(s) mutated, {} {}, {} inconclusive, {} in files not compiled",
+                t.targets, t.checked, t.skipped, t.functions - t.not_compiled, t.vacuous + t.weak, if t.weak > 0 || vacuity_checker::mutate::mode() == vacuity_checker::mutate::Mode::DefaultBody { "weak-ensures candidate(s)" } else { "vacuous" }, t.inconclusive, t.not_compiled
             );
             println!("report: {}", out.join("report.md").display());
             ExitCode::SUCCESS

@@ -15,6 +15,8 @@ pub struct Totals {
     pub skipped: usize,
     pub functions: usize,
     pub vacuous: usize,
+    /// Weak-ensures mode: mutants that verified.
+    pub weak: usize,
     pub inconclusive: usize,
     /// Functions in files that are not part of the build; no mutant was run.
     pub not_compiled: usize,
@@ -31,9 +33,10 @@ pub fn totals(entries: &[SweepEntry]) -> Totals {
                 for f in &r.functions {
                     match f.verdict {
                         Verdict::Vacuous => t.vacuous += 1,
+                        Verdict::Weak => t.weak += 1,
                         Verdict::Inconclusive(_) => t.inconclusive += 1,
                         Verdict::NotCompiled => t.not_compiled += 1,
-                        Verdict::NotVacuous => {}
+                        Verdict::NotVacuous | Verdict::NotWeak => {}
                     }
                 }
             }
@@ -60,6 +63,9 @@ fn first_line(s: &str) -> String {
 
 /// Render the Markdown report for one checked repository (or directory).
 pub fn render_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig) -> String {
+    if crate::mutate::mode() == crate::mutate::Mode::DefaultBody {
+        return render_weak_markdown(root, entries, config);
+    }
     let t = totals(entries);
     let mut m = String::new();
     // Inside a container the real path is not meaningful; the caller can supply a label.
@@ -161,6 +167,88 @@ pub fn render_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig
     m
 }
 
+/// Report for the weak-ensures check: a list of functions to review by hand.
+fn render_weak_markdown(root: &Path, entries: &[SweepEntry], config: &VerusConfig) -> String {
+    let t = totals(entries);
+    let mut m = String::new();
+    let label = std::env::var("VACUITY_ROOT_LABEL").unwrap_or_else(|_| root.display().to_string());
+    let _ = writeln!(m, "# Weak-ensures report: `{label}`\n");
+    if let Some(remote) = git(root, &["remote", "get-url", "origin"]) {
+        let _ = writeln!(m, "- Repository: {remote}");
+    }
+    if let Some(commit) = git(root, &["rev-parse", "HEAD"]) {
+        let _ = writeln!(m, "- Commit: `{commit}`");
+    }
+    let _ = writeln!(m, "- Verus: {}", verus_version(config).unwrap_or_else(|| "unknown".into()));
+    let _ = writeln!(
+        m,
+        "- Mutation: each function body is replaced by a default value of its return type \
+         (`0`, `false`, `None`, `Vec::new()`, `{{}}` for unit, ...). A function is listed below if the file \
+         still verifies: its `ensures` accepts that default.\n"
+    );
+    let _ = writeln!(
+        m,
+        "**These are candidates, not confirmed bugs.** A postcondition may be loose on purpose, or the default \
+         may be a legitimate result. A function whose `requires` is unsatisfiable also verifies here. Review each diff.\n"
+    );
+    let mutated = t.functions - t.not_compiled;
+    let _ = writeln!(m, "## Summary\n");
+    let _ = writeln!(m, "| | |\n|---|---|");
+    let _ = writeln!(m, "| Targets (crates / standalone files) | {} |", t.targets);
+    let _ = writeln!(m, "| Checked | {} |", t.checked);
+    let _ = writeln!(m, "| Skipped (baseline did not verify) | {} |", t.skipped);
+    let _ = writeln!(m, "| Functions mutated | {mutated} |");
+    let _ = writeln!(m, "| **Weak-ensures candidates** | **{}** |", t.weak);
+    let _ = writeln!(m, "| Ensures reject the default (not weak) | {} |", mutated - t.weak - t.inconclusive);
+    let _ = writeln!(m, "| Inconclusive | {} |", t.inconclusive);
+    let _ = writeln!(m, "| Skipped: file not compiled in this build | {} |\n", t.not_compiled);
+
+    let _ = writeln!(m, "## Candidates to review ({})\n", t.weak);
+    if t.weak == 0 {
+        let _ = writeln!(m, "None found.\n");
+    } else {
+        let _ = writeln!(m, "| Function | Location | Diff |\n|---|---|---|");
+        for e in entries {
+            let FileResult::Checked(r) = &e.result else { continue };
+            for f in r.functions.iter().filter(|f| f.verdict == Verdict::Weak) {
+                let _ = writeln!(m, "| `{}` | `{}:{}` | `{}` |", f.name, e.path_of(f).display(), f.line, f.diff.display());
+            }
+        }
+        m.push('\n');
+    }
+    for e in entries {
+        let FileResult::Checked(r) = &e.result else { continue };
+        for f in r.functions.iter().filter(|f| f.verdict == Verdict::Weak) {
+            let _ = writeln!(m, "### `{}` in `{}:{}`\n", f.name, e.path_of(f).display(), f.line);
+            let diff = std::fs::read_to_string(&f.diff).unwrap_or_else(|_| "(diff unavailable)\n".into());
+            let _ = writeln!(m, "```diff\n{}```\n", diff);
+        }
+    }
+    if t.inconclusive > 0 {
+        let _ = writeln!(m, "## Inconclusive ({})\n", t.inconclusive);
+        let _ = writeln!(m, "| Function | Location | Reason |\n|---|---|---|");
+        for e in entries {
+            let FileResult::Checked(r) = &e.result else { continue };
+            for f in &r.functions {
+                if let Verdict::Inconclusive(why) = &f.verdict {
+                    let _ = writeln!(m, "| `{}` | `{}:{}` | {why} |", f.name, e.path_of(f).display(), f.line);
+                }
+            }
+        }
+        m.push('\n');
+    }
+    if t.skipped > 0 {
+        let _ = writeln!(m, "## Skipped targets ({})\n", t.skipped);
+        let _ = writeln!(m, "| Target | Reason |\n|---|---|");
+        for e in entries {
+            if let FileResult::Skipped(why) = &e.result {
+                let _ = writeln!(m, "| `{}` | {} |", e.rel_path.display(), first_line(why).replace('|', "\\|"));
+            }
+        }
+    }
+    m
+}
+
 /// Machine-readable results, one object per function (or per skipped target).
 pub fn summary_json(entries: &[SweepEntry]) -> serde_json::Value {
     let mut v = Vec::new();
@@ -171,6 +259,8 @@ pub fn summary_json(entries: &[SweepEntry]) -> serde_json::Value {
                     let verdict = match &f.verdict {
                         Verdict::Vacuous => "vacuous".to_string(),
                         Verdict::NotVacuous => "not_vacuous".to_string(),
+                        Verdict::Weak => "weak".to_string(),
+                        Verdict::NotWeak => "not_weak".to_string(),
                         Verdict::Inconclusive(w) => format!("inconclusive: {w}"),
                         Verdict::NotCompiled => "not_compiled".to_string(),
                     };

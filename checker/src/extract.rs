@@ -29,13 +29,24 @@ pub struct FnInfo {
     pub body: Range<usize>,
     /// 1-based line of the `fn` signature's ident.
     pub line: usize,
+    /// A body (with braces) returning a default value of the declared return type, e.g.
+    /// `{ 0 }` or `{ None }`; `{}` for a unit function. `None` when the type has no known default
+    /// (user types, generics, `Ghost`/`Tracked`, ...).
+    pub default_body: Option<String>,
 }
 
 impl FnInfo {
     /// Worth mutating: has a spec that could be vacuous, and a body to remove.
     /// Only exec functions for now; proof fns are deliberately excluded.
     pub fn is_candidate(&self) -> bool {
-        self.kind == FnKind::Exec && !self.external && !self.cfg_gated && (self.has_requires || self.has_ensures)
+        if self.kind != FnKind::Exec || self.external || self.cfg_gated {
+            return false;
+        }
+        match crate::mutate::mode() {
+            crate::mutate::Mode::Stub => self.has_requires || self.has_ensures,
+            // Weak-ensures check: only a postcondition can be weak, and we need a default to return.
+            crate::mutate::Mode::DefaultBody => self.has_ensures && self.default_body.is_some(),
+        }
     }
 }
 
@@ -85,7 +96,56 @@ impl Collector {
             external: attrs.iter().any(is_external_attr),
             body: braces.open().byte_range().start..braces.close().byte_range().end,
             line: sig.ident.span().start().line,
+            // A body that already is the default would "verify" as itself: not a weakness.
+            default_body: default_body(&sig.output)
+                .filter(|d| strip_ws(d) != strip_ws(&block.to_token_stream().to_string())),
         });
+    }
+}
+
+fn strip_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// A body returning a default value for the declared return type, if we know one.
+fn default_body(out: &verus_syn::ReturnType) -> Option<String> {
+    match out {
+        verus_syn::ReturnType::Default => Some("{}".to_string()),
+        // `-> (tracked r: T)` returns ghost state; nothing sensible to fabricate.
+        verus_syn::ReturnType::Type(_, Some(_), ..) => None,
+        verus_syn::ReturnType::Type(_, None, _, ty) => default_value(ty).map(|v| if v == "()" { "{}".to_string() } else { format!("{{ {v} }}") }),
+    }
+}
+
+/// An expression of type `ty` built from literals and `new()`-style constructors.
+fn default_value(ty: &verus_syn::Type) -> Option<String> {
+    use verus_syn::Type;
+    match ty {
+        Type::Paren(p) => default_value(&p.elem),
+        Type::Group(g) => default_value(&g.elem),
+        Type::Tuple(t) => {
+            let parts: Option<Vec<String>> = t.elems.iter().map(default_value).collect();
+            let parts = parts?;
+            Some(if parts.len() == 1 { format!("({},)", parts[0]) } else { format!("({})", parts.join(", ")) })
+        }
+        Type::Reference(r) if r.mutability.is_none() => match &*r.elem {
+            Type::Path(p) if p.path.is_ident("str") => Some("\"\"".to_string()),
+            _ => None,
+        },
+        Type::Path(p) if p.qself.is_none() => {
+            let last = p.path.segments.last()?;
+            // `std::vec::Vec<u8>` and `Vec<u8>` alike; only plain (non-generic-param) names are known.
+            match last.ident.to_string().as_str() {
+                "bool" => Some("false".into()),
+                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => Some("0".into()),
+                "char" => Some("'a'".into()),
+                "String" => Some("String::new()".into()),
+                "Vec" => Some("Vec::new()".into()),
+                "Option" => Some("None".into()),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 

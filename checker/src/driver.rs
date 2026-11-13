@@ -15,6 +15,11 @@ pub enum Verdict {
     /// The function's file is not part of the build (inactive `cfg`, undeclared or commented-out
     /// module), so a stub there would "verify" trivially. No mutant was run.
     NotCompiled,
+    /// Weak-ensures mode: the mutant returning a default value verified, so the `ensures` accepts
+    /// it. A candidate for review, not necessarily a bug.
+    Weak,
+    /// Weak-ensures mode: the default-returning mutant failed verification (the `ensures` rejects it).
+    NotWeak,
     /// The mutant did not compile, timed out, or Verus could not be launched.
     Inconclusive(String),
 }
@@ -69,9 +74,15 @@ pub fn check_file(config: &VerusConfig, input: &Path, out_dir: &Path) -> Result<
     Ok(Report { functions, single_function_hits: 0 })
 }
 
+fn weak_mode() -> bool {
+    crate::mutate::mode() == crate::mutate::Mode::DefaultBody
+}
+
 fn verdict_of(outcome: Outcome) -> Verdict {
     match outcome {
+        Outcome::Verified { .. } if weak_mode() => Verdict::Weak,
         Outcome::Verified { .. } => Verdict::Vacuous,
+        Outcome::Failed { errors: Some(n), .. } if n >= 1 && weak_mode() => Verdict::NotWeak,
         Outcome::Failed { errors: Some(n), .. } if n >= 1 => Verdict::NotVacuous,
         Outcome::Failed { .. } => Verdict::Inconclusive("mutant did not compile".into()),
         Outcome::Timeout => Verdict::Inconclusive("timeout".into()),
@@ -174,7 +185,7 @@ fn verify_mutant(config: &VerusConfig, crate_dir: &Path, file: &Path, f: &crate:
             let r = run_build_with(config, crate_dir, opts, &args);
             if let Outcome::Failed { errors: Some(n), .. } = r.outcome {
                 if n >= 1 {
-                    return (Verdict::NotVacuous, true);
+                    return (if weak_mode() { Verdict::NotWeak } else { Verdict::NotVacuous }, true);
                 }
             }
         }
